@@ -5,9 +5,10 @@ from streamlit_gsheets import GSheetsConnection
 from fpdf import FPDF
 import io
 
-# --- 1. CONFIG ---
+# --- 1. SETTINGS & THEME ---
 st.set_page_config(page_title="Aswin's Money Manager", layout="wide")
 
+# Custom CSS for Mobile UI
 st.markdown("""
     <style>
     .stButton>button { width: 100%; border-radius: 8px; height: 3.5em; font-weight: bold; }
@@ -18,17 +19,16 @@ st.markdown("""
 if 'dark_mode' not in st.session_state:
     st.session_state.dark_mode = False
 
-# --- 2. DATA CONNECTION ---
+# --- 2. DATA ENGINE ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def get_data():
     try:
-        # Use ttl=0 to ensure we always get the freshest data from your sheet
+        # ttl=0 ensures we don't show old cached data
         data = conn.read(ttl=0)
         required = ["Name", "Date", "Time", "Amount", "Status"]
-        if data.empty:
+        if data is None or data.empty:
             return pd.DataFrame(columns=required)
-        # Ensure all required columns exist
         for col in required:
             if col not in data.columns: data[col] = None
         data['Date'] = pd.to_datetime(data['Date']).dt.date
@@ -38,119 +38,113 @@ def get_data():
 
 df = get_data()
 
-# --- 3. TOP BAR ---
-h1, h2, h3 = st.columns([1, 4, 1])
-if h1.button("🔄"):
+# --- 3. TOP NAVIGATION (Refresh & Dark Mode) ---
+t1, t2, t3 = st.columns([1, 4, 1])
+if t1.button("🔄 Refresh"):
     st.rerun()
-with h3:
-    if st.button("🌙" if not st.session_state.dark_mode else "☀️"):
+
+with t3:
+    label = "🌙 Dark" if not st.session_state.dark_mode else "☀️ Light"
+    if st.button(label):
         st.session_state.dark_mode = not st.session_state.dark_mode
         st.rerun()
 
-# --- 4. NAVIGATION ---
+# --- 4. SIDEBAR MENU ---
 menu = st.sidebar.radio("Navigation", ["Dashboard", "Log History", "Client Section", "Calendar"])
 
-# --- 5. DASHBOARD ---
+# --- 5. DASHBOARD PAGE ---
 if menu == "Dashboard":
     st.title("Aswin's Money Manager")
+    
     today = datetime.now().date()
-    # Monday to Sunday Logic
+    # Week logic: Monday to Sunday
     start_of_week = today - timedelta(days=today.weekday())
     month_start = today.replace(day=1)
     
-    this_month = df[df['Date'] >= month_start]
-    this_week = df[df['Date'] >= start_of_week]
+    this_month_df = df[df['Date'] >= month_start]
+    this_week_df = df[df['Date'] >= start_of_week]
     
-    c1, c2 = st.columns(2)
-    c1.metric("Services (Month)", len(this_month))
-    c2.metric("Services (Week)", len(this_week))
+    # Metrics
+    m1, m2 = st.columns(2)
+    m1.metric("Services (Month)", len(this_month_df))
+    m2.metric("Services (Week)", len(this_week_df))
     
-    paid_m = pd.to_numeric(this_month[this_month['Status'] == 'Paid']['Amount'], errors='coerce').sum()
-    pending_t = pd.to_numeric(df[df['Status'] == 'Pending']['Amount'], errors='coerce').sum()
+    # Calculate totals safely
+    paid_total = pd.to_numeric(this_month_df[this_month_df['Status'] == 'Paid']['Amount'], errors='coerce').sum()
+    pending_total = pd.to_numeric(df[df['Status'] == 'Pending']['Amount'], errors='coerce').sum()
     
-    c3, c4 = st.columns(2)
-    c3.metric("Received (Month)", f"{paid_m} CAD")
-    c4.metric("Total Pending", f"{pending_t} CAD")
+    m3, m4 = st.columns(2)
+    m3.metric("Money Received (Month)", f"{paid_total} CAD")
+    m4.metric("Pending Total Amount", f"{pending_total} CAD")
 
     st.divider()
-    st.subheader("📝 New Entry")
-    with st.form("entry", clear_on_submit=True):
-        name = st.text_input("Customer Name")
-        f1, f2 = st.columns(2)
-        d_val = f1.date_input("Date", today)
-        t_val = f2.time_input("Time", datetime.now().time())
-        if st.form_submit_button("Save to Sheet"):
-            if name:
+    
+    # Entry Section
+    st.subheader("📝 Quick Service Entry")
+    with st.form("entry_form", clear_on_submit=True):
+        c_name = st.text_input("Customer Name")
+        c1, c2 = st.columns(2)
+        c_date = c1.date_input("Date of Service", today)
+        c_time = c2.time_input("Time of Service", datetime.now().time())
+        st.info("Default Cost: 15 CAD | Status: Pending")
+        
+        if st.form_submit_button("Save Entry"):
+            if c_name:
                 new_row = pd.DataFrame([{
-                    "Name": name, "Date": str(d_val), 
-                    "Time": t_val.strftime("%I:%M %p"), 
-                    "Amount": 15.0, "Status": "Pending"
+                    "Name": c_name, 
+                    "Date": str(c_date), 
+                    "Time": c_time.strftime("%I:%M %p"), 
+                    "Amount": 15.0, 
+                    "Status": "Pending"
                 }])
-                # Force update to use the combined dataframe
-                updated_df = pd.concat([df, new_row], ignore_index=True)
-                conn.update(data=updated_df)
-                st.success("Successfully Saved!")
+                updated = pd.concat([df, new_row], ignore_index=True)
+                # CRITICAL: We explicitly name the worksheet to avoid UnsupportedOperationError
+                conn.update(worksheet="Sheet1", data=updated)
+                st.success(f"Saved entry for {c_name}!")
                 st.rerun()
+            else:
+                st.error("Please enter a customer name.")
 
     st.divider()
-    ex1, ex2 = st.columns(2)
+    
+    # Export Section
+    st.subheader("📤 Export Data")
+    e1, e2 = st.columns(2)
     # Excel
-    buf = io.BytesIO()
-    df.to_excel(buf, index=False, engine='openpyxl')
-    ex1.download_button("📂 Excel", data=buf.getvalue(), file_name="coaching.xlsx")
+    output_excel = io.BytesIO()
+    df.to_excel(output_excel, index=False, engine='openpyxl')
+    e1.download_button("Export to Excel", data=output_excel.getvalue(), file_name="coaching_logs.xlsx")
+    
     # PDF
     pdf = FPDF()
-    pdf.add_page(); pdf.set_font("Arial", size=12)
-    pdf.cell(200, 10, txt="Aswin's Coaching Logs", ln=1, align='C')
-    for _, r in df.iterrows():
-        pdf.cell(200, 10, txt=f"{r['Date']} | {r['Name']} | {r['Amount']} CAD", ln=True)
-    ex2.download_button("📂 PDF", data=pdf.output(dest='S').encode('latin-1'), file_name="coaching.pdf")
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    pdf.cell(200, 10, txt="Aswin's Coaching Records", ln=1, align='C')
+    for _, row in df.iterrows():
+        pdf.cell(200, 10, txt=f"{row['Date']} | {row['Name']} | {row['Time']} | {row['Amount']} CAD", ln=True)
+    e2.download_button("Export to PDF", data=pdf.output(dest='S').encode('latin-1'), file_name="coaching_logs.pdf")
 
-# --- 6. LOG HISTORY ---
+# --- 6. LOG HISTORY PAGE ---
 elif menu == "Log History":
-    st.title("📂 History")
-    col_a, col_b = st.columns(2)
-    sd = col_a.date_input("From", datetime.now().date() - timedelta(days=30))
-    ed = col_b.date_input("To", datetime.now().date())
+    st.title("📂 Log History")
+    f1, f2 = st.columns(2)
+    sd = f1.date_input("Start Date", today - timedelta(days=30))
+    ed = f2.date_input("End Date", today)
     
-    filt = df[(df['Date'] >= sd) & (df['Date'] <= ed)]
-    for i, r in filt.iterrows():
-        with st.expander(f"{r['Date']} - {r['Name']}"):
-            if st.button("Delete (Red)", key=f"d{i}"):
-                conn.update(data=df.drop(i)); st.rerun()
+    filtered = df[(df['Date'] >= sd) & (df['Date'] <= ed)]
+    
+    for idx, row in filtered.iterrows():
+        with st.expander(f"{row['Date']} - {row['Time']} - {row['Name']}"):
+            col1, col2 = st.columns(2)
+            if col1.button("Edit", key=f"ed{idx}"): st.info("Edit feature coming soon")
+            if col2.button("Delete", key=f"del{idx}"):
+                new_df = df.drop(idx)
+                conn.update(worksheet="Sheet1", data=new_df)
+                st.rerun()
 
 # --- 7. CLIENT SECTION ---
 elif menu == "Client Section":
-    st.title("👥 Clients")
-    u = df['Name'].unique()
-    if len(u) > 0:
-        target = st.selectbox("Select Client", u)
-        h = df[df['Name'] == target]
-        for i, r in h.iterrows():
-            c1, c2, c3 = st.columns([3, 1, 1])
-            c1.write(f"{r['Date']} @ {r['Time']}")
-            if c2.button("Delete", key=f"cd{i}"):
-                conn.update(data=df.drop(i)); st.rerun()
-            if r['Status'] == 'Pending':
-                if c3.button("Mark Paid", key=f"cp{i}"):
-                    df.at[i, 'Status'] = 'Paid'
-                    conn.update(data=df); st.rerun()
-        
-        st.divider()
-        due = pd.to_numeric(h[h['Status'] == 'Pending']['Amount'], errors='coerce').sum()
-        if due > 0:
-            log_txt = "\n".join([f"{r['Date']} {r['Time']}" for _, r in h[h['Status']=='Pending'].iterrows()])
-            msg = f"Hi {target}, your coaching sessions on: {log_txt} are pending. Total: {due} CAD. Please pay and share screenshot."
-            st.text_area("Share Reminder", msg, height=150)
-    else:
-        st.info("No clients found yet.")
-
-# --- 8. CALENDAR ---
-elif menu == "Calendar":
-    st.title("📅 Calendar")
-    p = st.date_input("Pick Date")
-    res = df[df['Date'] == p]
-    if not res.empty:
-        st.table(res[['Time', 'Name', 'Status']])
-    else:
-        st.info("No records.")
+    st.title("👥 Client Section")
+    clients = df['Name'].unique()
+    if len(clients) > 0:
+        selected_client = st.selectbox("Select Customer",
