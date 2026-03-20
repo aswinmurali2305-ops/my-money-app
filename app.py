@@ -6,7 +6,6 @@ from streamlit_gsheets import GSheetsConnection
 # --- 1. INITIAL CONFIG ---
 st.set_page_config(page_title="Aswin's Money Manager", layout="wide")
 
-# Define 'today' at the very top so it's available everywhere
 now = datetime.now()
 today = now.date()
 
@@ -16,8 +15,12 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 # Read existing data
 try:
     df = conn.read()
+    # Safety Check: If the sheet exists but is missing columns, add them
+    for col in ["Name", "Date", "Amount", "Status", "Time"]:
+        if col not in df.columns:
+            df[col] = None
 except Exception:
-    # If sheet is empty, create a starting structure
+    # If sheet is totally empty or can't be read, start fresh
     df = pd.DataFrame(columns=["Name", "Date", "Amount", "Status", "Time"])
 
 # --- 2. SIDEBAR NAVIGATION ---
@@ -30,13 +33,14 @@ if choice == "Dashboard":
     
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Total Clients", len(df))
+        st.metric("Total Clients", len(df.dropna(subset=['Name'])))
     with col2:
-        # Convert Amount to numeric just in case
+        # Convert Amount to numeric, treating errors as 0
         total_amt = pd.to_numeric(df['Amount'], errors='coerce').sum()
         st.metric("Total Revenue", f"₹{total_amt:,.2f}")
     with col3:
-        st.metric("Today's Entries", len(df[df['Date'].astype(str) == str(today)]))
+        today_count = len(df[df['Date'].astype(str) == str(today)])
+        st.metric("Today's Entries", today_count)
 
     st.subheader("Recent Activity")
     st.dataframe(df.tail(10), use_container_width=True)
@@ -63,8 +67,10 @@ elif choice == "Add Record":
                 
                 # Combine and update
                 updated_df = pd.concat([df, new_data], ignore_index=True)
-                conn.update(data=updated_df)
+                # Clean up any empty rows before saving
+                updated_df = updated_df.dropna(how='all')
                 
+                conn.update(data=updated_df)
                 st.success(f"✅ Successfully added {name}!")
                 st.balloons()
             else:
@@ -74,11 +80,9 @@ elif choice == "Add Record":
 elif choice == "Calendar":
     st.subheader("📅 Service Calendar")
     sel_date = st.date_input("Select Date to View", today)
-    
     day_df = df[df['Date'].astype(str) == str(sel_date)]
     
     if not day_df.empty:
-        st.write(f"Showing records for {sel_date}:")
         st.table(day_df[['Name', 'Amount', 'Status', 'Time']])
     else:
         st.info("No records found for this date.")
@@ -86,11 +90,8 @@ elif choice == "Calendar":
 # --- 6. LOG HISTORY ---
 elif choice == "Log History":
     st.subheader("📂 Historical Data")
-    # Filters
     search = st.text_input("Search Name")
-    
     display_df = df.copy()
     if search:
-        display_df = display_df[display_df['Name'].str.contains(search, case=False)]
-    
+        display_df = display_df[display_df['Name'].str.contains(search, case=False, na=False)]
     st.dataframe(display_df, use_container_width=True)
