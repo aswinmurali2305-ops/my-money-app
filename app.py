@@ -1,97 +1,91 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 from streamlit_gsheets import GSheetsConnection
 
-# --- 1. INITIAL CONFIG ---
-st.set_page_config(page_title="Aswin's Money Manager", layout="wide")
+# --- 1. SETTINGS ---
+st.set_page_config(page_title="Money Tracker", layout="wide", initial_sidebar_state="expanded")
 
+# Fix for the 'today' error
 now = datetime.now()
 today = now.date()
 
-# Connect to Google Sheets
+# --- 2. DATA CONNECTION ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# Read existing data
-try:
-    df = conn.read()
-    # Safety Check: If the sheet exists but is missing columns, add them
-    for col in ["Name", "Date", "Amount", "Status", "Time"]:
-        if col not in df.columns:
-            df[col] = None
-except Exception:
-    # If sheet is totally empty or can't be read, start fresh
-    df = pd.DataFrame(columns=["Name", "Date", "Amount", "Status", "Time"])
+def load_data():
+    try:
+        data = conn.read()
+        # Force specific column names to keep the interface clean
+        required = ["Name", "Date", "Amount", "Status", "Time"]
+        for col in required:
+            if col not in data.columns:
+                data[col] = ""
+        return data[required] # Only show these 5 columns
+    except:
+        return pd.DataFrame(columns=["Name", "Date", "Amount", "Status", "Time"])
 
-# --- 2. SIDEBAR NAVIGATION ---
-st.sidebar.title("💰 Navigation")
-choice = st.sidebar.radio("Go to", ["Dashboard", "Add Record", "Calendar", "Log History"])
+df = load_data()
 
-# --- 3. DASHBOARD ---
-if choice == "Dashboard":
-    st.title("📊 Business Overview")
+# --- 3. SIDEBAR NAVIGATION ---
+with st.sidebar:
+    st.markdown("## 💰 My Money App")
+    choice = st.radio("Menu", ["📊 Dashboard", "📝 Add New Entry", "📂 View All Logs"])
+    st.divider()
+    st.info("Resyncs automatically with Google Sheets")
+
+# --- 4. DASHBOARD ---
+if choice == "📊 Dashboard":
+    st.title("Business Overview")
     
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Total Clients", len(df.dropna(subset=['Name'])))
-    with col2:
-        # Convert Amount to numeric, treating errors as 0
-        total_amt = pd.to_numeric(df['Amount'], errors='coerce').sum()
-        st.metric("Total Revenue", f"₹{total_amt:,.2f}")
-    with col3:
-        today_count = len(df[df['Date'].astype(str) == str(today)])
-        st.metric("Today's Entries", today_count)
-
+    # Calculate metrics
+    total_rev = pd.to_numeric(df['Amount'], errors='coerce').sum()
+    today_data = df[df['Date'].astype(str) == str(today)]
+    
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Total Revenue", f"₹{total_rev:,.0f}")
+    m2.metric("Total Clients", len(df.dropna(subset=['Name'])))
+    m3.metric("Entries Today", len(today_data))
+    
+    st.divider()
     st.subheader("Recent Activity")
-    st.dataframe(df.tail(10), use_container_width=True)
+    # Clean up display: remove empty rows and show only the last 5
+    clean_df = df.dropna(subset=['Name']).tail(5)
+    st.table(clean_df)
 
-# --- 4. ADD RECORD ---
-elif choice == "Add Record":
-    st.subheader("📝 Register New Client")
-    with st.form("entry_form"):
-        name = st.text_input("Client Name")
-        amount = st.number_input("Amount (₹)", min_value=0)
-        date = st.date_input("Service Date", today)
-        time = st.time_input("Time", now.time())
-        status = st.selectbox("Status", ["Paid", "Pending"])
+# --- 5. ADD ENTRY ---
+elif choice == "📝 Add New Entry":
+    st.title("New Registration")
+    
+    with st.form("add_form", clear_on_submit=True):
+        col_a, col_b = st.columns(2)
+        name = col_a.text_input("Client Name")
+        amt = col_b.number_input("Amount (₹)", min_value=0, step=100)
         
-        if st.form_submit_button("Save to Google Sheets"):
+        col_c, col_d = st.columns(2)
+        status = col_c.selectbox("Payment Status", ["Paid", "Pending"])
+        note = col_d.text_input("Note (Optional)") # Extra column for details
+        
+        if st.form_submit_button("Save to Database"):
             if name:
-                new_data = pd.DataFrame([{
+                new_entry = pd.DataFrame([{
                     "Name": name,
-                    "Date": str(date),
-                    "Amount": amount,
+                    "Date": str(today),
+                    "Amount": amt,
                     "Status": status,
-                    "Time": str(time)
+                    "Time": now.strftime("%I:%M %p")
                 }])
                 
-                # Combine and update
-                updated_df = pd.concat([df, new_data], ignore_index=True)
-                # Clean up any empty rows before saving
-                updated_df = updated_df.dropna(how='all')
-                
+                updated_df = pd.concat([df, new_entry], ignore_index=True)
                 conn.update(data=updated_df)
-                st.success(f"✅ Successfully added {name}!")
+                
+                st.success(f"Successfully recorded ₹{amt} for {name}")
                 st.balloons()
+                st.rerun()
             else:
-                st.error("Please enter a Name.")
+                st.error("Please enter a name.")
 
-# --- 5. CALENDAR VIEW ---
-elif choice == "Calendar":
-    st.subheader("📅 Service Calendar")
-    sel_date = st.date_input("Select Date to View", today)
-    day_df = df[df['Date'].astype(str) == str(sel_date)]
-    
-    if not day_df.empty:
-        st.table(day_df[['Name', 'Amount', 'Status', 'Time']])
-    else:
-        st.info("No records found for this date.")
-
-# --- 6. LOG HISTORY ---
-elif choice == "Log History":
-    st.subheader("📂 Historical Data")
-    search = st.text_input("Search Name")
-    display_df = df.copy()
-    if search:
-        display_df = display_df[display_df['Name'].str.contains(search, case=False, na=False)]
-    st.dataframe(display_df, use_container_width=True)
+# --- 6. LOGS ---
+elif choice == "📂 View All Logs":
+    st.title("Full Transaction History")
+    st.dataframe(df.dropna(subset=['Name']), use_container_width=True)
